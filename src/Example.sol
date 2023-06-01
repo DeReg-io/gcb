@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.19;
 
-import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
+import {CircuitConsumer} from "gcb/CircuitConsumer.sol";
+import {CircuitTransferLib} from "gcb/utils/CircuitTransferLib.sol";
 
 /// @author philogy <https://github.com/philogy>
-contract Example {
-    using SafeTransferLib for address;
+contract Example is CircuitConsumer {
+    using CircuitTransferLib for address;
 
     mapping(address => uint256) public balance;
 
     address public immutable token;
 
-    constructor(address token_) {
+    constructor(address circuitBreaker, address token_) CircuitConsumer(circuitBreaker) {
         token = token_;
     }
 
