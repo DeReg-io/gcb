@@ -13,8 +13,9 @@ contract LogicProxy {
     bytes32 internal constant _CORE_DATA_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
     uint256 internal constant _ETH_REDIRECT_DISABLED_FLAG = 0x010000000000000000000000000000000000000000;
     uint256 internal constant _NOT_PAUSED_FLAG = 0x020000000000000000000000000000000000000000;
-    // Flags that cannot be touched by implementation (breaker disabled).
-    uint256 internal constant _ROOT_FLAGS_MASK = 0x010000000000000000000000000000000000000000;
+    // Core data that cannot be touched by implementation (implementation, redirect enabled/disabled).
+    uint256 internal constant _INTEGRAL_DATA_MASK = 0x01ffffffffffffffffffffffffffffffffffffffff;
+    uint256 internal constant _IMPL_MASK = 0x00ffffffffffffffffffffffffffffffffffffffff;
     uint256 internal constant _AUX_ONLY_MASK = 0xffffffffffffffffffffffff0000000000000000000000000000000000000000;
 
     address internal immutable BREAKER;
@@ -26,9 +27,9 @@ contract LogicProxy {
     event Paused();
     event Unpaused();
     event EthRelayDisabled();
+    event Upgraded(address indexed newImplementation);
 
     constructor(address startImplementation, address breaker) {
-        assert(_ROOT_FLAGS_MASK == _ETH_REDIRECT_DISABLED_FLAG | 0);
         BREAKER = breaker;
         assembly {
             sstore(_CORE_DATA_SLOT, or(startImplementation, _NOT_PAUSED_FLAG))
@@ -47,6 +48,17 @@ contract LogicProxy {
         }
     }
 
+    /**
+     * @dev Allows `onlyBreaker` methods to accept and forward ETH to implementation while still
+     * reverting if breaker calls with ETH.
+     */
+    modifier actuallyNonPayable() {
+        assembly {
+            if callvalue() { revert(0, 0) }
+        }
+        _;
+    }
+
     receive() external payable {
         _delegateToImpl();
     }
@@ -58,14 +70,15 @@ contract LogicProxy {
     /**
      * @dev Allows `BREAKER` to upg
      */
-    function upgradeTo(address _newImpl) external payable onlyBreaker {
+    function upgradeTo(address implementation) external payable onlyBreaker actuallyNonPayable {
         assembly {
-            let currentImplData := sload(_CORE_DATA_SLOT)
-            sstore(_CORE_DATA_SLOT, or(and(currentImplData, _AUX_ONLY_MASK), _newImpl))
+            let coreData := sload(_CORE_DATA_SLOT)
+            sstore(_CORE_DATA_SLOT, or(and(coreData, _AUX_ONLY_MASK), implementation))
         }
+        emit Upgraded(implementation);
     }
 
-    function disableEthRelay() external payable onlyBreaker {
+    function disableEthRelay() external payable onlyBreaker actuallyNonPayable {
         assembly {
             let currentImplData := sload(_CORE_DATA_SLOT)
             sstore(_CORE_DATA_SLOT, or(currentImplData, _ETH_REDIRECT_DISABLED_FLAG))
@@ -87,7 +100,7 @@ contract LogicProxy {
         }
     }
 
-    function pause() external payable onlyBreaker {
+    function pause() external payable onlyBreaker actuallyNonPayable {
         assembly {
             let prevCoreData := sload(_CORE_DATA_SLOT)
             sstore(_CORE_DATA_SLOT, and(prevCoreData, not(_NOT_PAUSED_FLAG)))
@@ -95,7 +108,7 @@ contract LogicProxy {
         emit Paused();
     }
 
-    function unpause() external payable onlyBreaker {
+    function unpause() external payable onlyBreaker actuallyNonPayable {
         assembly {
             let prevCoreData := sload(_CORE_DATA_SLOT)
             sstore(_CORE_DATA_SLOT, or(prevCoreData, _NOT_PAUSED_FLAG))
@@ -125,10 +138,12 @@ contract LogicProxy {
             calldatacopy(0x00, 0x00, calldatasize())
             // Append asset layer and auxiliary data as an immutable arg.
             mstore(calldatasize(), or(and(coreData, _AUX_ONLY_MASK), breaker))
+
+            // Implementation can't unpause because it won't be called in the first place if paused.
             let success := delegatecall(gas(), coreData, 0x00, add(calldatasize(), 0x20), 0x00, 0x00)
 
-            // Ensure that implementation didn't change root flags.
-            if iszero(eq(and(sload(_CORE_DATA_SLOT), _ROOT_FLAGS_MASK), and(coreData, _ROOT_FLAGS_MASK))) {
+            // Ensure that implementation didn't change integral core data.
+            if iszero(eq(and(sload(_CORE_DATA_SLOT), _INTEGRAL_DATA_MASK), and(coreData, _INTEGRAL_DATA_MASK))) {
                 // `revert RootFlagsChanged()`
                 mstore(0x00, 0xe9df817e)
                 revert(0x1c, 0x04)
